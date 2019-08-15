@@ -39,9 +39,11 @@ print(text_words[:10])
 ## train paras
 batch_size = 128
 learning_rate = 0.1
-num_steps = 1000000 # 训练的步数
+num_steps = 100000 # 训练的步数
 display_steps = 1000
 eval_steps = 2000
+model_path = './tmp/model.ckpt'  # 模型权重的保存地址
+log_path = './tmp/logs/'
 ## word2vec paras
 max_vocab_size = 50000
 min_freq = 10
@@ -130,18 +132,18 @@ for i in range(8):
     print(batch[i], id2word[batch[i]], "->", labels[i, 0], id2word[labels[i, 0]])
 
 # placeholder
-X = tf.placeholder(tf.int32, shape=[None])
-Y = tf.placeholder(tf.int32, shape=[None, 1])
+X = tf.placeholder(tf.int32, shape=[None], name='X')
+Y = tf.placeholder(tf.int32, shape=[None, 1], name='Y')
 eval_data = np.array([word2id[word] for word in eval_words])
 valid_data = tf.constant(eval_data, dtype=tf.int32)
 
 #
 with tf.device("/cpu:0"):
-    embedding = tf.Variable(tf.random_normal([vocab_size, embedding_size]))
+    embedding = tf.Variable(tf.random_normal([vocab_size, embedding_size]), name="Embedding")
     X_embed = tf.nn.embedding_lookup(embedding, X)
 
-    nce_weights = tf.Variable(tf.random_normal([vocab_size, embedding_size]))
-    nce_bias = tf.Variable(tf.zeros([vocab_size]))
+    nce_weights = tf.Variable(tf.random_normal([vocab_size, embedding_size]), name='nce_weights')
+    nce_bias = tf.Variable(tf.zeros([vocab_size]), name='nce_bias')
 
 # nce loss
 loss_op = tf.reduce_mean(tf.nn.nce_loss(weights=nce_weights,
@@ -150,6 +152,12 @@ loss_op = tf.reduce_mean(tf.nn.nce_loss(weights=nce_weights,
                                         inputs=X_embed,
                                         num_sampled=num_sampled,
                                         num_classes=vocab_size))
+
+# 创建summary来monitor loss_op
+tf.summary.scalar('loss', loss_op)
+
+# if have other metrics to monitor, should Merge all summaries into a single op
+merged_summary_op = tf.summary.merge_all()
 
 # optimizer
 optimizer = tf.train.GradientDescentOptimizer(learning_rate).minimize(loss_op)
@@ -163,10 +171,55 @@ similarity = tf.matmul(valid_embed_norm, norm_embed, transpose_b=True)
 # initializer
 init = tf.global_variables_initializer()
 
+# Saver op to save and restore all the variables
+saver = tf.train.Saver()
+
 # train
 with tf.Session() as sess:
     sess.run(init)
 
+    # op to write logs to Tensorboard
+    summary_writer = tf.summary.FileWriter(log_path, graph=tf.get_default_graph())
+
+    total_loss = 0.
+    for step in range(num_steps):
+        batch_x, batch_y = next_batch(batch_size, skip_window, num_skips)
+        _, loss, summary = sess.run([optimizer, loss_op, merged_summary_op], feed_dict={X: batch_x, Y: batch_y})
+
+        # Write logs at every iteration
+        summary_writer.add_summary(summary, step)
+
+        total_loss += loss
+
+        if step % display_steps == 0:
+            avg_loss = total_loss / display_steps
+            print("Step #%d" % step, "Average loss=%.5f" % avg_loss)
+            total_loss = 0.
+
+        # Evaluate
+        if step % eval_steps == 0:
+            sim = similarity.eval()
+            for i in range(len(eval_words)):
+                # nearest = sim[i, :].argsort()[::-1][1:(topk+1)]
+                # print("%s nearest neighbors: %s" % (eval_words[i], " ".join([id2word[j] for j in nearest])))
+                nearest = (-sim[i, :]).argsort()[1:topk + 1]
+                log_str = '"%s" nearest neighbors:' % eval_words[i]
+                for k in range(topk):
+                    log_str = '%s %s,' % (log_str, id2word[nearest[k]])
+                print(log_str)
+
+    # Save model weights to disk
+    saver.save(sess, save_path=model_path)
+
+
+# running a new session, 进行新的训练
+with tf.Session() as sess:
+    sess.run(init)
+
+    # Restore model weights from previously saved model
+    load_path = saver.restore(sess, save_path=model_path)
+
+    # 重新训练
     total_loss = 0.
     for step in range(num_steps):
         batch_x, batch_y = next_batch(batch_size, skip_window, num_skips)
@@ -190,3 +243,13 @@ with tf.Session() as sess:
                 for k in range(topk):
                     log_str = '%s %s,' % (log_str, id2word[nearest[k]])
                 print(log_str)
+
+    print("再次迭代训练！")
+
+# 启动tensorboard
+"""
+后台启动：
+tensorboard --logdir=/tmp/pycharm_project_717/tf_practice/tmp/logs
+浏览器打开：
+http://192.168.15.27:6006
+"""
